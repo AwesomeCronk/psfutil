@@ -85,9 +85,9 @@ def readPSF(binary):
             pixels = []
             for y in range(height):
                 # Comment examples are assuming 8x5 fontface
-                rowBytes = binary[headerSize + (charSize * i0):headerSize + (charSize * i0) + (rowSize * y)]  # Ex. 0x58
+                rowBytes = binary[headerSize + (charSize * i0) + (rowSize * y):headerSize + (charSize * i0) + (rowSize * (y + 1))]  # Ex. 0x58
                 rowInt = int.from_bytes(rowBytes, 'big')    # Ex. 0b01011000
-                rowInt >> (rowSize * 8) - width     # Ex. 0b01011
+                rowInt >>= (rowSize * 8) - width     # Ex. 0b01011
                 for i1 in range(width - 1, -1, -1):
                     pixels.append((rowInt & (2 ** i1)) >> i1)
             font.addGlyph(pixels)
