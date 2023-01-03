@@ -1,7 +1,12 @@
-### psfutil - PSF font utility ###
+### psfutil - PC Screen Font Utility ###
 # Uses https://git.kernel.org/pub/scm/linux/kernel/git/legion/kbd.git/tree/src/psf.h?id=82dd58358bd341f8ad71155a53a561cf311ac974 as reference for PSF font format
+# See https://github.com/AwesomeCronk/psfutil/blob/master/LICENSE for license
 
-import argparse
+
+import argparse, sys
+
+from fontTools.ttLib import TTFont
+from PIL import Image, ImageDraw, ImageFont
 
 
 _version = '0.0.1'
@@ -12,7 +17,7 @@ def getArgs():
     subParsers = rootParser.add_subparsers(dest='command')
     subParsers.required = True
 
-    showParser = subParsers.add_parser('show')
+    showParser = subParsers.add_parser('show', help='Show a glyph')
     showParser.set_defaults(function=command_show)
     showParser.add_argument(
         'infile',
@@ -32,12 +37,39 @@ def getArgs():
         default='t',
     )
 
+    ttf2psfParser = subParsers.add_parser('ttf2psf', help='Convert ttf or otf font to psf')
+    ttf2psfParser.set_defaults(function=command_ttf2psf)
+    ttf2psfParser.add_argument(
+        'infile',
+        help='Input ttf file',
+        type=str
+    )
+    ttf2psfParser.add_argument(
+        'height',
+        help='Height of glyphs',
+        type=int
+    )
+    ttf2psfParser.add_argument(
+        '-o',
+        '--outfile',
+        help='Output psf file',
+        type=str,
+        default='font.psf'
+    )
+    ttf2psfParser.add_argument(
+        '-t',
+        '--thres',
+        help='Brightness threshold to accoutn for antialiasing',
+        type=int,
+        default=0.5
+    )
+
     return rootParser.parse_args()
 
 
 class psf():
-    # Python is big-endian, C is little-endian
-    # Magic numbers here appear backwards to the magic number defined in kernel/git/legion/kbd.git as a result
+    # Hex constants in Python are big-endian, in C they are little-endian
+    # Constants here appear backwards to those defined in kernel/git/legion/kbd.git as a result
     PSF1_MAGIC_NUMBER       = 0x0435
     PSF1_MODE_512           = 0x01
     PSF1_MODE_HASTAB        = 0x02
@@ -74,13 +106,15 @@ class psf():
 
     def renderGlyph(self, index):
         glyph = self.glyphs[index]
+        print('-' * ((self.width * 2) + 3))
         for y in range(self.height):
-            print(' '.join(['#' if bit else ' ' for bit in glyph[y * self.width:(y + 1) * self.width]]))
+            print('| ' + ' '.join(['#' if bit else ' ' for bit in glyph[y * self.width:(y + 1) * self.width]]) + ' |')
+        print('-' * ((self.width * 2) + 4))
 
-def readPSF(binary):
+def readPSF(binary: bytes):
     # print('Header begins at 0x0')
     if int.from_bytes(binary[0:2], 'little') == psf.PSF1_MAGIC_NUMBER:
-        raise NotImplementedError('PSF 1 support not implemented')
+        print('ERROR: PSF 1 support not implemented'); sys.exit(1)
     
     elif int.from_bytes(binary[0:4], 'little') == psf.PSF2_MAGIC_NUMBER:
         version     = int.from_bytes(binary[4:8],   'little')
@@ -139,6 +173,37 @@ def readPSF(binary):
     else:
         raise ValueError('Invalid font data (bad magic number)')
 
+def writePSF(font: psf, PSF2=True):
+    if not PSF2: print('ERROR: Cannot export to PSF1 format'); sys.exit(1)
+    headerSize = (8 * 4).to_bytes(4, 'little')
+    rowSize = (font.width // 8 + (1 if font.width % 8 else 0))
+    charSize = font.height * rowSize
+    binary = b''
+    binary += psf.PSF2_MAGIC_NUMBER.to_bytes(4, 'little')
+    binary += font.version.to_bytes(4, 'little')
+    binary += headerSize
+    binary += font.flags.to_bytes(4, 'little')
+    binary += font.length.to_bytes(4, 'little')
+    binary += charSize
+    binary += font.height.to_bytes(4, 'little')
+    binary += font.width.to_bytes(4, 'little')
+
+    for glyph in font.glyphs:
+        for y in range(font.height):
+            rowBits = glyph[font.width * y:font.width * (y + 1)]
+            rowInt = 0
+            for rowBit in rowBits:
+                rowInt += rowBit
+                rowInt << 1
+            rowInt << rowSize - font.width
+            binary += rowInt.to_bytes(rowSize, 'big')
+
+    for i0 in range(font.length):
+        chars = ''
+        for i1, id in enumerate(font.charMap.values()):
+            if id == i0: chars += font.charMap.keys()[i1]
+        print(chars)
+
 
 def command_show(args):
     with open(args.infile, 'rb') as infile:
@@ -155,6 +220,46 @@ def command_show(args):
         raise ValueError('Invalid format: {}'.format(args.format))
 
     font.renderGlyph(index)
+
+def command_ttf2psf(args):
+    # Get characters
+    ttfFont = TTFont(args.infile)
+    charIDs = []
+    for table in ttfFont['cmap'].tables:
+        charIDs += list(table.cmap.keys())
+    for charID in charIDs:
+        while charIDs.count(charID) > 1:
+            charIDs.remove(charID)
+    chars = []
+    for charID in charIDs:
+        try: chars.append(int.to_bytes(charID, 1, 'big').decode())
+        except: print('WARNING: Could not decode char with id {}'.format(charID))
+
+    img = Image.new('RGB', (args.height * 2, args.height))
+    draw = ImageDraw.Draw(img)
+    ttfFont = ImageFont.truetype(args.infile, args.height)
+
+    draw.text((0, 0), 'A', font=ttfFont)
+    img = img.crop((0, 0, ttfFont.getlength('A'), args.height))
+
+    pixels = []
+    for y in range(img.height):
+        for x in range(img.width):
+            if img.getpixel((x, y))[0] >= args.thres * 255:
+                pixels.append(1); img.putpixel((x, y), (255, 255, 255))
+            else:
+                pixels.append(0); img.putpixel((x, y), (0, 0, 0))
+    
+    width = img.width
+    height = args.height
+    glyph = pixels
+
+    print('-' * ((width * 2) + 3))
+    for y in range(height):
+        print('| ' + ' '.join(['#' if bit else ' ' for bit in glyph[y * width:(y + 1) * width]]) + ' |')
+    print('-' * ((width * 2) + 4))
+
+    img.show()
 
 
 if __name__ == '__main__':
