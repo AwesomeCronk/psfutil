@@ -9,11 +9,14 @@ from fontTools.ttLib import TTFont
 from PIL import Image, ImageDraw, ImageFont
 
 
-_version = '0.0.1'
+_version = '1.0.0'
 
 
 def getArgs():
-    rootParser = argparse.ArgumentParser(prog='psfutil')
+    rootParser = argparse.ArgumentParser(
+        prog='psfutil',
+        description='See https://github.com/AwesomeCronk/psfutil for help or to raise an issue'
+    )
     subParsers = rootParser.add_subparsers(dest='command')
     subParsers.required = True
 
@@ -60,7 +63,7 @@ def getArgs():
         '-t',
         '--thres',
         help='Brightness threshold to accoutn for antialiasing',
-        type=int,
+        type=float,
         default=0.5
     )
 
@@ -100,16 +103,17 @@ class psf():
     __str__ = __repr__
 
     def addGlyph(self, pixels):
-        if len(pixels) != self.height * self.width: raise ValueError('{} pixels is incorrect for {}x{}'.format(len(pixels), self.height, self.width))
-        if len(self.glyphs) >= self.length: raise ValueError('Cannot add glyph (max {})'.format(self.length))
+        if len(pixels) != self.height * self.width: print('ERROR: {} pixels is incorrect for {}x{}'.format(len(pixels), self.height, self.width)); sys.exit(1)
+        if len(self.glyphs) >= self.length: print('ERROR: Cannot add glyph (max {})'.format(self.length)); sys.exit(1)
         self.glyphs.append(pixels)
 
     def renderGlyph(self, index):
         glyph = self.glyphs[index]
-        print('-' * ((self.width * 2) + 3))
+        bar = '-' * ((self.width * 2) + 3)
+        print(bar)
         for y in range(self.height):
             print('| ' + ' '.join(['#' if bit else ' ' for bit in glyph[y * self.width:(y + 1) * self.width]]) + ' |')
-        print('-' * ((self.width * 2) + 4))
+        print(bar)
 
 def readPSF(binary: bytes):
     # print('Header begins at 0x0')
@@ -127,7 +131,7 @@ def readPSF(binary: bytes):
         
         font = psf(version, flags, height, width, length)
 
-        if charSize != font.charSize: raise ValueError('Invalid font data (bad charSize)')
+        if charSize != font.charSize: print('ERROR: Invalid font data (bad charSize)'); sys.exit(1)
 
         # print('Font data begins at 0x{:X}'.format(headerSize))
         rowSize = charSize // height    # Number of bytes per row
@@ -166,43 +170,55 @@ def readPSF(binary: bytes):
                         print('WARNING: Unable to decode {} for glyph {}, skipping character(s)'.format(data, i0))
 
         else:
-            raise ValueError('Font has no unicode table')
+            print('ERROR: Font has no unicode table'); sys.exit(1)
 
         return font
 
     else:
-        raise ValueError('Invalid font data (bad magic number)')
+        print('ERROR: Invalid font data (bad magic number)'); sys.exit(1)
 
 def writePSF(font: psf, PSF2=True):
     if not PSF2: print('ERROR: Cannot export to PSF1 format'); sys.exit(1)
-    headerSize = (8 * 4).to_bytes(4, 'little')
+    binary = b''
+
+    # Write header
+    headerSize = (8 * 4)
     rowSize = (font.width // 8 + (1 if font.width % 8 else 0))
     charSize = font.height * rowSize
-    binary = b''
+
     binary += psf.PSF2_MAGIC_NUMBER.to_bytes(4, 'little')
     binary += font.version.to_bytes(4, 'little')
-    binary += headerSize
+    binary += headerSize.to_bytes(4, 'little')
     binary += font.flags.to_bytes(4, 'little')
     binary += font.length.to_bytes(4, 'little')
-    binary += charSize
+    binary += charSize.to_bytes(4, 'little')
     binary += font.height.to_bytes(4, 'little')
     binary += font.width.to_bytes(4, 'little')
 
+    # Write glyphs
     for glyph in font.glyphs:
         for y in range(font.height):
             rowBits = glyph[font.width * y:font.width * (y + 1)]
             rowInt = 0
             for rowBit in rowBits:
-                rowInt += rowBit
-                rowInt << 1
-            rowInt << rowSize - font.width
+                rowInt |= rowBit
+                rowInt <<= 1
+            rowInt << (rowSize * 8) - font.width
             binary += rowInt.to_bytes(rowSize, 'big')
 
-    for i0 in range(font.length):
-        chars = ''
-        for i1, id in enumerate(font.charMap.values()):
-            if id == i0: chars += font.charMap.keys()[i1]
-        print(chars)
+    if font.flags & psf.PSF2_FLAG_HAS_UNICODE:
+        # Write unicode table
+        for i0 in range(font.length):
+            chars = ''
+            charMapKeys = list(font.charMap.keys())
+            for i1, id in enumerate(font.charMap.values()):
+                if id == i0: chars += charMapKeys[i1]
+            # print(chars)
+
+            binary += chars.encode()
+            binary += psf.PSF2_SEP.to_bytes(1, 'little')
+
+    return binary
 
 
 def command_show(args):
@@ -211,18 +227,18 @@ def command_show(args):
 
     if args.format in ('t', 'text'):
         index = font.charMap[args.glyph]
-        if index is None: raise ValueError('Glyph not found in font')
+        if index is None: print('ERROR: Glyph not found in font'); sys.exit(1)
     
     elif args.format in ('i', 'index'):
         index = int(args.glyph)
 
     else:
-        raise ValueError('Invalid format: {}'.format(args.format))
+        print('ERROR: Invalid format: {}'.format(args.format)); sys.exit(1)
 
     font.renderGlyph(index)
 
 def command_ttf2psf(args):
-    # Get characters
+    # Get characters from TTF
     ttfFont = TTFont(args.infile)
     charIDs = []
     for table in ttfFont['cmap'].tables:
@@ -232,34 +248,45 @@ def command_ttf2psf(args):
             charIDs.remove(charID)
     chars = []
     for charID in charIDs:
-        try: chars.append(int.to_bytes(charID, 1, 'big').decode())
+        try: chars.append(chr(charID))
         except: print('WARNING: Could not decode char with id {}'.format(charID))
 
-    img = Image.new('RGB', (args.height * 2, args.height))
-    draw = ImageDraw.Draw(img)
+
+    # Find max width
     ttfFont = ImageFont.truetype(args.infile, args.height)
+    width = max([int(ttfFont.getlength(char)) for char in chars])
+    print('Character width: {}'.format(width))
 
-    draw.text((0, 0), 'A', font=ttfFont)
-    img = img.crop((0, 0, ttfFont.getlength('A'), args.height))
-
-    pixels = []
-    for y in range(img.height):
-        for x in range(img.width):
-            if img.getpixel((x, y))[0] >= args.thres * 255:
-                pixels.append(1); img.putpixel((x, y), (255, 255, 255))
-            else:
-                pixels.append(0); img.putpixel((x, y), (0, 0, 0))
+    # Set up rendering and initialize PSF font object
+    img = Image.new('RGB', (width, args.height))
+    draw = ImageDraw.Draw(img)
+    psfFont = psf(0, 0, args.height, width, len(chars))
+    # psfFont = psf(0, 0, args.height, width, 2)
+    psfFont.flags |= psf.PSF2_FLAG_HAS_UNICODE
     
-    width = img.width
-    height = args.height
-    glyph = pixels
+    # Resolve glyphs
+    for c, char in enumerate(chars):
+    # for c, char in enumerate(('A', 'B')):
+            
+        draw.text((0, 0), char, font=ttfFont)
 
-    print('-' * ((width * 2) + 3))
-    for y in range(height):
-        print('| ' + ' '.join(['#' if bit else ' ' for bit in glyph[y * width:(y + 1) * width]]) + ' |')
-    print('-' * ((width * 2) + 4))
+        pixels = []
+        for y in range(img.height):
+            for x in range(img.width):
+                if img.getpixel((x, y))[0] >= args.thres * 255:
+                    pixels.append(1)
+                else:
+                    pixels.append(0)
+                img.putpixel((x, y), (0, 0, 0))
+        
+        psfFont.addGlyph(pixels)
+        psfFont.charMap[char] = c
+        # psfFont.renderGlyph(c)
 
-    img.show()
+    binary = writePSF(psfFont, PSF2=True)
+    with open(args.outfile, 'wb') as outfile:
+        outfile.write(binary)
+    
 
 
 if __name__ == '__main__':
