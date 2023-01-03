@@ -4,20 +4,35 @@
 import argparse
 
 
+_version = '0.0.1'
+
+
 def getArgs():
-    parser = argparse.ArgumentParser(prog='psfutil')
-    parser.add_argument(
+    rootParser = argparse.ArgumentParser(prog='psfutil')
+    subParsers = rootParser.add_subparsers(dest='command')
+    subParsers.required = True
+
+    showParser = subParsers.add_parser('show')
+    showParser.set_defaults(function=command_show)
+    showParser.add_argument(
         'infile',
         help='Input file',
         type=str
     )
-    parser.add_argument(
-        'index',
-        help='debug thing',
-        type=int
+    showParser.add_argument(
+        'glyph',
+        help='Glyph to show',
+        type=str
+    )
+    showParser.add_argument(
+        '-f',
+        '--format',
+        help='Glyph input format (t=text, i=index)',
+        type=str,
+        default='t',
     )
 
-    return parser.parse_args()
+    return rootParser.parse_args()
 
 
 class psf():
@@ -29,22 +44,23 @@ class psf():
     PSF1_MODE_HASSEQ        = 0x04
     PSF1_MAX_MODE           = 0x05
     PSF1_SEP                = 0xFFFF
-    PSF1_SEQ                = 0xFFFE
+    PSF1_SEQ                = 0xEFFF
 
     PSF2_FLAG_HAS_UNICODE   = 0x01
     PSF2_MAGIC_NUMBER       = 0x864AB572
     PSF2_MAXVERSION         = 0
     PSF2_SEP                = 0xFF
-    PSF2_SEQ                = 0xFE
+    PSF2_SEQ                = 0xEF
 
-    def __init__(self, version: int, flags: int, height: int, width: int):
+    def __init__(self, version: int, flags: int, height: int, width: int, length: int):
         self.version = version
         self.flags = flags
         self.charSize = height * ((width + 7) // 8)
         self.height = height
         self.width = width
-        self.length = 0
+        self.length = length
         self.glyphs = []
+        self.charMap = {}
 
     def __repr__(self):
         return 'psf(version={}, flags={}, length={}, charSize={}, height={}, width={})'.format(self.version, self.flags, self.length, self.charSize, self.height, self.width)
@@ -53,8 +69,8 @@ class psf():
 
     def addGlyph(self, pixels):
         if len(pixels) != self.height * self.width: raise ValueError('{} pixels is incorrect for {}x{}'.format(len(pixels), self.height, self.width))
+        if len(self.glyphs) >= self.length: raise ValueError('Cannot add glyph (max {})'.format(self.length))
         self.glyphs.append(pixels)
-        self.length = len(self.glyphs)
 
     def renderGlyph(self, index):
         glyph = self.glyphs[index]
@@ -62,7 +78,7 @@ class psf():
             print(' '.join(['#' if bit else ' ' for bit in glyph[y * self.width:(y + 1) * self.width]]))
 
 def readPSF(binary):
-    print('Header begins at 0x0')
+    # print('Header begins at 0x0')
     if int.from_bytes(binary[0:2], 'little') == psf.PSF1_MAGIC_NUMBER:
         raise NotImplementedError('PSF 1 support not implemented')
     
@@ -75,11 +91,11 @@ def readPSF(binary):
         height      = int.from_bytes(binary[24:28], 'little')
         width       = int.from_bytes(binary[28:32], 'little')
         
-        font = psf(version, flags, height, width)
+        font = psf(version, flags, height, width, length)
 
         if charSize != font.charSize: raise ValueError('Invalid font data (bad charSize)')
 
-        print('Font data begins at 0x{:X}'.format(headerSize))
+        # print('Font data begins at 0x{:X}'.format(headerSize))
         rowSize = charSize // height    # Number of bytes per row
         for i0 in range(length):
             pixels = []
@@ -95,7 +111,25 @@ def readPSF(binary):
         if flags & psf.PSF2_FLAG_HAS_UNICODE:
 
             unicodeStart = headerSize + charSize * length
-            print('Unicode data begins at 0x{:X}'.format(unicodeStart))
+            # print('Unicode data begins at 0x{:X}'.format(unicodeStart))
+
+            ptr = unicodeStart
+            for i in range(length):
+                byte = -1
+                while byte != psf.PSF2_SEP:
+                    byte = binary[ptr]; ptr += 1
+                    data = b''
+                    while not byte in (psf.PSF2_SEQ, psf.PSF2_SEP):
+                        data += byte.to_bytes(1, 'big')
+                        byte = binary[ptr]; ptr += 1
+
+                    try:
+                        chars = data.decode()
+                        for char in chars:
+                            font.charMap[char] = i
+
+                    except UnicodeDecodeError:
+                        print('WARNING: Unable to decode {} for glyph {}, skipping character(s)'.format(data, i0))
 
         else:
             raise ValueError('Font has no unicode table')
@@ -106,11 +140,25 @@ def readPSF(binary):
         raise ValueError('Invalid font data (bad magic number)')
 
 
+def command_show(args):
+    with open(args.infile, 'rb') as infile:
+        font = readPSF(infile.read())
+
+    if args.format in ('t', 'text'):
+        index = font.charMap[args.glyph]
+        if index is None: raise ValueError('Glyph not found in font')
+    
+    elif args.format in ('i', 'index'):
+        index = int(args.glyph)
+
+    else:
+        raise ValueError('Invalid format: {}'.format(args.format))
+
+    font.renderGlyph(index)
+
+
 if __name__ == '__main__':
+    print('PC Screen Font Utility v{}'.format(_version))
     args = getArgs()
 
-    with open(args.infile, 'rb') as infile:
-        f = readPSF(infile.read())
-        print(f)
-        f.renderGlyph(args.index)
-
+    args.function(args)
