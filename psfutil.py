@@ -62,7 +62,7 @@ def getArgs():
     ttf2psfParser.add_argument(
         '-t',
         '--thres',
-        help='Brightness threshold to accoutn for antialiasing',
+        help='Brightness threshold to account for antialiasing',
         type=float,
         default=0.5
     )
